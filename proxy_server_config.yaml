@@ -20,7 +20,9 @@ litellm_settings:
   request_timeout: 600
   telemetry: false
   success_callback: ["langfuse"]
-  callbacks: ["custom_auth.MetadataValidator"]
+  callbacks:
+    - custom_auth.MetadataValidator
+    - custom_auth.BudgetTracker
 
 general_settings:
   master_key: sk-litellm-master-key-1234
