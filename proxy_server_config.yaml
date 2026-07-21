@@ -21,8 +21,8 @@ litellm_settings:
   telemetry: false
   success_callback: ["langfuse"]
   callbacks:
-    - custom_auth.MetadataValidator
-    - custom_auth.BudgetTracker
+    - custom_auth.validator
+    - custom_auth.tracker
 
 general_settings:
   master_key: sk-litellm-master-key-1234

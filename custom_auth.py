@@ -8,9 +8,12 @@ Litellm 自定义校验：metadata 强制 + 超支熔断。
 
   litellm_settings:
     callbacks:
-      - custom_auth.MetadataValidator
-      - custom_auth.BudgetTracker
+      - custom_auth.validator
+      - custom_auth.tracker
 """
+
+# 模块级实例（litellm 的 get_instance_fn 返回模块属性，故需要实例而非类）
+# 见文件末尾赋值
 
 import asyncio
 import json
@@ -169,3 +172,8 @@ class BudgetTracker(CustomLogger):
         async with self._lock:
             self._spend[user_id] = self._spend.get(user_id, 0.0) + response_cost
             await self._persist()
+
+
+# 模块级实例 — litellm 的 get_instance_fn 通过 getattr(module, name) 获取，必须返回实例
+validator = MetadataValidator()
+tracker = BudgetTracker()
