@@ -187,6 +187,46 @@ class CompositeNotifier(Notifier):
                 results.append(False)
         return any(results)
 
+    async def send(self, message: str, channel: str = "dingtalk"):
+        """Send a plain-text alert to a specific channel.
+
+        Used by rules engine's actions. Falls back to the first
+        matching channel notifier or the first available one.
+        """
+        target = None
+        for ch in self._channels:
+            if channel == "dingtalk" and isinstance(ch, DingTalkNotifier):
+                target = ch
+                break
+            if channel == "slack" and isinstance(ch, SlackNotifier):
+                target = ch
+                break
+            if channel == "email" and isinstance(ch, EmailNotifier):
+                target = ch
+                break
+        if target is None and self._channels:
+            target = self._channels[0]
+        if target is None:
+            return
+        # wrap message in a minimal PendingChange to reuse channel logic
+        from .models import PendingChange, ChangeRecord, ChangeType
+        pc = PendingChange(
+            change_id=f"rule_{abs(hash(message))}",
+            provider="rules",
+            changes=[
+                ChangeRecord(
+                    model="",
+                    field=ChangeType.PRICE_CHANGE,
+                    old_value="",
+                    new_value="",
+                    description=message,
+                    impact="",
+                    suggested_action="",
+                )
+            ],
+        )
+        await target.send_change_notification(pc, detail_url="")
+
     def summarize_channels(self) -> str:
         names = []
         for ch in self._channels:

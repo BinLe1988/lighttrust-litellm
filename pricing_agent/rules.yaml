@@ -1,0 +1,120 @@
+# ── 规则引擎默认规则集 ──────────────────────────────────────────
+#
+# 放在 pricing_agent/ 下；也可通过 RULES_PATH 环境变量指定。
+# 通过 enabled: false 临时禁用某条规则。
+
+
+rules:
+
+  # ── ① 预算阈值 ─────────────────────────────────────────────
+  - name: monthly_budget_80pct
+    description: 月度预算使用率达到 80% 时告警
+    enabled: true
+    type: budget_threshold
+    condition:
+      metric: spend_ratio
+      operator: ">="
+      value: 0.8
+    actions:
+      - action: notify
+        channels: ["dingtalk"]
+        message: "⚠️ {{ user_id }} 本月预算已用 {{ spend_ratio:.1% }}（{{ current_spend:.2f }}/{{ max_budget:.2f }} USD）"
+    cooldown: 86400
+
+  - name: monthly_budget_95pct
+    description: 月度预算使用率达到 95% 时告警 + 降级
+    enabled: true
+    type: budget_threshold
+    condition:
+      metric: spend_ratio
+      operator: ">="
+      value: 0.95
+    actions:
+      - action: notify
+        channels: ["dingtalk", "slack"]
+      - action: degrade
+        throttle_pct: 0.5
+    cooldown: 3600
+
+  - name: monthly_budget_exceeded
+    description: 超预算时直接拒绝请求
+    enabled: true
+    type: budget_threshold
+    condition:
+      metric: spend_ratio
+      operator: ">="
+      value: 1.0
+    actions:
+      - action: reject
+        status_code: 429
+        message: "Month budget exceeded ({{ spend_ratio:.1%}})"
+    cooldown: 0
+
+
+  # ── ② 预算预测 ─────────────────────────────────────────────
+  - name: predict_overspend
+    description: 预测本月将超支时告警 + 降级（至少需要 3 天数据）
+    enabled: true
+    type: budget_prediction
+    condition:
+      metric: predicted_ratio
+      operator: ">="
+      value: 1.0
+      min_days_elapsed: 3
+    actions:
+      - action: notify
+        channels: ["dingtalk", "slack"]
+        message: "📊 预测 {{ user_id }} 本月花费 ${{ predicted_monthly_spend:.0f }}，将超出预算 {{ predicted_ratio:.0% }}"
+      - action: degrade
+        throttle_pct: 0.4
+    cooldown: 43200
+
+
+  # ── ③ 异常检测 ─────────────────────────────────────────────
+  - name: anomaly_spend_spike
+    description: 短时间内花费速率异常飙升（>3x 基线）
+    enabled: true
+    type: anomaly
+    condition:
+      metric: spend_rate
+      multiplier: 3.0
+      min_samples: 5
+    actions:
+      - action: notify
+        channels: ["dingtalk"]
+        message: "🚨 {{ user_id }} 花费速率异常: {{ spend_rate:.4f }}/s（基线 {{ spend_rate_baseline:.4f }}/s）"
+      - action: degrade
+        throttle_pct: 0.3
+    cooldown: 1800
+
+  - name: anomaly_error_spike
+    description: 错误率异常飙升（>3x 基线）
+    enabled: true
+    type: anomaly
+    condition:
+      metric: error_rate
+      multiplier: 3.0
+      min_samples: 5
+    actions:
+      - action: notify
+        channels: ["dingtalk"]
+        message: "🚨 {{ user_id }} 错误率异常: {{ error_rate:.2% }}"
+      - action: degrade
+        fallback_model: "deepseek-v4-flash"
+    cooldown: 1800
+
+  - name: anomaly_request_spike
+    description: 请求量异常飙升（>5x 基线）
+    enabled: true
+    type: anomaly
+    condition:
+      metric: request_rate
+      multiplier: 5.0
+      min_samples: 5
+    actions:
+      - action: notify
+        channels: ["dingtalk"]
+        message: "🚨 {{ user_id }} 请求量异常飙升: {{ request_rate:.2f }}/s"
+      - action: degrade
+        throttle_pct: 0.5
+    cooldown: 1800
