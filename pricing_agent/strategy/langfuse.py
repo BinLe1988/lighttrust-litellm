@@ -14,6 +14,7 @@ Langfuse 归因查询客户端。
 
 import os
 import json
+import time as _time
 import logging
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
@@ -25,7 +26,7 @@ import httpx
 logger = logging.getLogger("strategy.langfuse")
 
 
-LANGFUSE_BASE = os.environ.get("LANGFUSE_BASE_URL", "http://localhost:3000")
+LANGFUSE_BASE = os.environ.get("LANGFUSE_BASE_URL", "http://localhost:3001")
 LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY", "pk-lf-local")
 LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "sk-lf-local")
 
@@ -57,17 +58,52 @@ class LangfuseClient:
             },
             timeout=30,
         )
+        self._last_req_time = 0.0
+
+    def _rate_limit(self):
+        """Ensure at least RATE_LIMIT_INTERVAL seconds between requests."""
+        interval = 4.0  # well within 15 req / 39s
+        elapsed = _time.time() - self._last_req_time
+        if elapsed < interval:
+            _time.sleep(interval - elapsed)
+        self._last_req_time = _time.time()
 
     # ── generic GET helper ──────────────────────────────────────
 
     def _get(self, path: str, params: Optional[dict] = None) -> dict:
+        self._rate_limit()
         url = f"/api/public{path}"
         if params:
-            qs = urlencode({k: v for k, v in params.items() if v is not None}, doseq=True)
-            url = f"{url}?{qs}"
-        resp = self._http.get(url)
-        resp.raise_for_status()
-        return resp.json()
+            clean = {}
+            for k, v in params.items():
+                if v is None:
+                    continue
+                if isinstance(v, list):
+                    if v:
+                        clean[k] = v
+                else:
+                    clean[k] = v
+            if clean:
+                qs = urlencode(clean, doseq=True)
+                url = f"{url}?{qs}"
+        for attempt in range(10):
+            resp = self._http.get(url)
+            if resp.status_code == 429:
+                try:
+                    body = resp.json()
+                    wait = body.get("details", {}).get("retryAfterSeconds", 10)
+                except Exception:
+                    wait = 10
+                logger.warning("Rate limited, retrying in %ds (attempt %d/10)...", wait, attempt + 1)
+                _time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        raise httpx.HTTPStatusError(
+            "Rate limited after 10 retries",
+            request=resp.request,
+            response=resp,
+        )
 
     # ── traces ──────────────────────────────────────────────────
 
@@ -97,11 +133,11 @@ class LangfuseClient:
     def list_observations(
         self,
         page: int = 1,
-        limit: int = 200,
+        limit: int = 50,
         trace_id: Optional[str] = None,
         from_timestamp: Optional[str] = None,
         to_timestamp: Optional[str] = None,
-        observation_type: Optional[str] = None,  # "GENERATION", "SPAN", "EVENT"
+        observation_type: Optional[str] = None,
     ) -> dict:
         params = dict(
             page=page,
@@ -160,18 +196,18 @@ class LangfuseClient:
 
     def traces_in_period(self, days: int = 7, **extra) -> list[dict]:
         now = datetime.now(timezone.utc)
-        since = (now - timedelta(days=days)).isoformat()
-        data = self.list_traces(from_timestamp=since, limit=500, **extra)
+        since = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+        data = self.list_traces(from_timestamp=since, limit=100, **extra)
         return data.get("data", [])
 
     def generations_for_trace(self, trace_id: str) -> list[dict]:
         data = self.list_observations(
-            trace_id=trace_id, type="GENERATION", limit=200
+            trace_id=trace_id, observation_type="GENERATION", limit=50
         )
         return data.get("data", [])
 
     def scores_for_trace(self, trace_id: str, name: Optional[str] = None) -> list[dict]:
-        data = self.list_scores(trace_id=trace_id, name=name, limit=100)
+        data = self.list_scores(trace_id=trace_id, name=name, limit=50)
         return data.get("data", [])
 
     # ── usage cost helpers ──────────────────────────────────────
@@ -183,6 +219,10 @@ class LangfuseClient:
         for t in traces:
             total += t.get("totalCost", 0) or 0
         return total
+
+    def _rate_limit_delay(self):
+        """Small delay between requests to avoid 429."""
+        _time.sleep(0.1)
 
     def close(self):
         self._http.close()
