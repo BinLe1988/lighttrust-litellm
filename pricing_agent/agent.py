@@ -3,13 +3,18 @@
 Pricing Intelligence Agent — CLI tool for litellm.
 
 Usage:
-  python -m pricing_agent.agent check          fetch & diff vendor prices
-  python -m pricing_agent.agent review          review pending changes
-  python -m pricing_agent.agent apply           apply approved changes
-  python -m pricing_agent.agent status          show current state
+  python -m pricing_agent.agent check           fetch & diff vendor prices
+  python -m pricing_agent.agent check --model M  use specific LLM for extraction
+  python -m pricing_agent.agent check --analyze  also run LLM impact analysis
+  python -m pricing_agent.agent review           review pending changes
+  python -m pricing_agent.agent apply            apply approved changes
+  python -m pricing_agent.agent status           show current state
+  python -m pricing_agent.agent daemon           run periodic checks in background
+  python -m pricing_agent.agent serve            start FastAPI webhook server
 """
 
 import asyncio
+import os
 import sys
 from typing import Optional
 
@@ -39,16 +44,82 @@ def _cyan(s: str) -> str:
 store = PendingChangeStore()
 
 
-async def cmd_check(monitor_name: Optional[str] = None):
+async def run_check(
+    monitor_name: Optional[str] = None,
+    analyze: bool = False,
+    webhook_url: Optional[str] = None,
+    llm_model: Optional[str] = None,
+    verbose: bool = True,
+) -> dict:
+    """Shared check logic used by CLI, server, and daemon modes."""
+    monitors = [monitor_name] if monitor_name else list_monitors()
+    result: dict = {"changes": [], "analyses": [], "notified": False}
+
+    for name in monitors:
+        mon = get_monitor(name)
+        if llm_model:
+            mon.llm_model = llm_model
+
+        snap = await mon.fetch()
+        if not snap.models:
+            continue
+
+        changes = diff_snapshot(snap)
+        if not changes:
+            continue
+
+        pc = store.add(provider=name, changes=changes)
+        result["changes"].append({
+            "change_id": pc.change_id,
+            "provider": name,
+            "count": len(changes),
+            "changes": [ch.detail() for ch in changes],
+        })
+
+        if analyze:
+            from .analyzer import analyze_changes
+            analyses = await analyze_changes(changes, model=llm_model)
+            if analyses:
+                result["analyses"].extend(analyses)
+                for analysis in analyses:
+                    rec = analysis.get("recommendation", "")
+                    if rec == "apply":
+                        store.approve(pc.change_id)
+                    elif rec == "skip":
+                        store.reject(pc.change_id, "LLM recommended skip")
+
+        if webhook_url:
+            try:
+                import httpx
+                payload = {
+                    "change_id": pc.change_id,
+                    "provider": name,
+                    "changes": [ch.detail() for ch in changes],
+                }
+                async with httpx.AsyncClient(timeout=10) as cli:
+                    await cli.post(webhook_url, json=payload)
+                result["notified"] = True
+            except Exception:
+                pass
+
+    return result
+
+
+async def cmd_check(
+    monitor_name: Optional[str] = None,
+    analyze: bool = False,
+    llm_model: Optional[str] = None,
+):
     print(_cyan("\n=== Pricing Intelligence: check ==="))
 
     monitors = [monitor_name] if monitor_name else list_monitors()
-    all_changes: list[PriceChange] = []
 
     for name in monitors:
         print(f"\n  fetching {name} pricing...", end=" ", flush=True)
         try:
             mon = get_monitor(name)
+            if llm_model:
+                mon.llm_model = llm_model
             snap = await mon.fetch()
             print(
                 _green(f"OK ({len(snap.models)} model(s))")
@@ -79,21 +150,39 @@ async def cmd_check(monitor_name: Optional[str] = None):
             print(_red(f"ERROR: {e}"))
             continue
 
-        if changes:
-            print(format_changes(changes))
-            pc = store.add(provider=name, changes=changes)
-            print(
-                f"  saved as {_yellow(pc.change_id)} "
-                f"({_cyan('python -m pricing_agent.agent review')} to review)"
-            )
-            all_changes.extend(changes)
+        if not changes:
+            continue
 
-    if not all_changes:
-        print(_green("\n  No changes detected — everything is up to date.\n"))
-    else:
+        print(format_changes(changes))
+        pc = store.add(provider=name, changes=changes)
         print(
-            f"\n  {_yellow(f'{len(all_changes)} change(s) pending review.')}\n"
+            f"  saved as {_yellow(pc.change_id)} "
+            f"({_cyan('python -m pricing_agent.agent review')} to review)"
         )
+
+        if analyze:
+            print(f"  running LLM analysis...", end=" ", flush=True)
+            from .analyzer import analyze_changes
+            analyses = await analyze_changes(changes, model=llm_model)
+            if analyses:
+                print(_green(f"{len(analyses)} analysis(es)"))
+                for a in analyses:
+                    rec = a.get("recommendation", "?")
+                    intent = a.get("intent", "?")
+                    print(
+                        f"    [{_yellow(rec):>8s}] intent={intent:20s} "
+                        f"{a.get('reasoning', '')[:100]}"
+                    )
+                    if rec == "apply":
+                        store.approve(pc.change_id)
+                        print(f"      → {_green('auto-approved')}")
+                    elif rec == "skip":
+                        store.reject(pc.change_id, "LLM recommended skip")
+                        print(f"      → {_yellow('auto-skipped')}")
+            else:
+                print(_yellow("no analysis returned"))
+
+    print()
 
 
 def cmd_review():
@@ -107,9 +196,9 @@ def cmd_review():
         for i, ch in enumerate(pc.changes, 1):
             print(f"  {i}. {ch.description}")
             if ch.impact:
-                print(f"     impact: {ch.impact[:120]}...")
+                print(f"     impact: {ch.impact[:120]}")
             if ch.suggested_action:
-                print(f"     action: {ch.suggested_action[:120]}...")
+                print(f"     action: {ch.suggested_action[:120]}")
             print()
 
         while True:
@@ -232,6 +321,52 @@ def cmd_status():
     print()
 
 
+async def cmd_daemon(
+    interval: int = 3600,
+    analyze: bool = False,
+    webhook_url: Optional[str] = None,
+    llm_model: Optional[str] = None,
+):
+    print(_cyan(f"\n=== Daemon mode — checking every {interval}s ===\n"))
+    while True:
+        try:
+            await cmd_check(analyze=analyze, llm_model=llm_model)
+            if webhook_url:
+                await run_check(webhook_url=webhook_url, llm_model=llm_model)
+        except Exception as e:
+            print(_red(f"check error: {e}"))
+        print(f"  next check in {interval}s...\n")
+        await asyncio.sleep(interval)
+
+
+def cmd_serve():
+    import uvicorn
+    port = int(os.environ.get("PRICING_AGENT_PORT", "4001"))
+    host = os.environ.get("PRICING_AGENT_HOST", "0.0.0.0")
+    print(_cyan(f"\n=== Starting server on {host}:{port} ===\n"))
+    uvicorn.run("pricing_agent.server:app", host=host, port=port, reload=False)
+
+
+def _parse_flags(rest: list[str]) -> dict:
+    kwargs: dict = {}
+    it = iter(rest)
+    for arg in it:
+        if arg == "--analyze":
+            kwargs["analyze"] = True
+        elif arg == "--model" or arg == "--llm-model":
+            kwargs["llm_model"] = next(it, None)
+        elif arg == "--webhook" or arg == "--webhook-url":
+            kwargs["webhook_url"] = next(it, None)
+        elif arg == "--interval":
+            try:
+                kwargs["interval"] = int(next(it, "3600"))
+            except ValueError:
+                kwargs["interval"] = 3600
+        elif not arg.startswith("--"):
+            kwargs.setdefault("monitor_name", arg)
+    return kwargs
+
+
 def main():
     args = sys.argv[1:]
     if not args:
@@ -240,16 +375,21 @@ def main():
 
     cmd = args[0]
     rest = args[1:]
+    flags = _parse_flags(rest)
 
     try:
         if cmd == "check":
-            asyncio.run(cmd_check(rest[0] if rest else None))
+            asyncio.run(cmd_check(**flags))
         elif cmd == "review":
             cmd_review()
         elif cmd == "apply":
             cmd_apply()
         elif cmd == "status":
             cmd_status()
+        elif cmd == "daemon":
+            asyncio.run(cmd_daemon(**flags))
+        elif cmd == "serve":
+            cmd_serve()
         else:
             print(f"unknown command: {cmd}\n{__doc__}")
     except KeyboardInterrupt:
