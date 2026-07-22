@@ -21,8 +21,9 @@ from typing import Optional
 from .models import PendingChange, PriceChange
 from .monitors.registry import get_monitor, list_monitors
 from .differ import diff_snapshot, CONFIG_PATH
-from .store import PendingChangeStore
+from .store import AbstractStore, create_store
 from .reporter import format_changes, format_pending
+from .notifier import CompositeNotifier
 
 
 def _green(s: str) -> str:
@@ -41,7 +42,8 @@ def _cyan(s: str) -> str:
     return f"\033[96m{s}\033[0m"
 
 
-store = PendingChangeStore()
+store: AbstractStore = create_store()
+notifier = CompositeNotifier()
 
 
 async def run_check(
@@ -68,7 +70,7 @@ async def run_check(
         if not changes:
             continue
 
-        pc = store.add(provider=name, changes=changes)
+        pc = await store.add(provider=name, changes=changes)
         result["changes"].append({
             "change_id": pc.change_id,
             "provider": name,
@@ -84,20 +86,29 @@ async def run_check(
                 for analysis in analyses:
                     rec = analysis.get("recommendation", "")
                     if rec == "apply":
-                        store.approve(pc.change_id)
+                        await store.approve(pc.change_id)
                     elif rec == "skip":
-                        store.reject(pc.change_id, "LLM recommended skip")
+                        await store.reject(pc.change_id, "LLM recommended skip")
+
+        if notifier.enabled:
+            detail_url = os.environ.get(
+                "PRICING_AGENT_PUBLIC_URL",
+                f"http://localhost:{os.environ.get('PRICING_AGENT_PORT', '4001')}",
+            )
+            await notifier.send_change_notification(
+                pc, f"{detail_url}/agent/change/{pc.change_id}",
+            )
+            result["notified"] = True
 
         if webhook_url:
             try:
                 import httpx
-                payload = {
-                    "change_id": pc.change_id,
-                    "provider": name,
-                    "changes": [ch.detail() for ch in changes],
-                }
                 async with httpx.AsyncClient(timeout=10) as cli:
-                    await cli.post(webhook_url, json=payload)
+                    await cli.post(webhook_url, json={
+                        "change_id": pc.change_id,
+                        "provider": name,
+                        "changes": [ch.detail() for ch in changes],
+                    })
                 result["notified"] = True
             except Exception:
                 pass
@@ -154,7 +165,7 @@ async def cmd_check(
             continue
 
         print(format_changes(changes))
-        pc = store.add(provider=name, changes=changes)
+        pc = await store.add(provider=name, changes=changes)
         print(
             f"  saved as {_yellow(pc.change_id)} "
             f"({_cyan('python -m pricing_agent.agent review')} to review)"
@@ -174,10 +185,10 @@ async def cmd_check(
                         f"{a.get('reasoning', '')[:100]}"
                     )
                     if rec == "apply":
-                        store.approve(pc.change_id)
+                        await store.approve(pc.change_id)
                         print(f"      → {_green('auto-approved')}")
                     elif rec == "skip":
-                        store.reject(pc.change_id, "LLM recommended skip")
+                        await store.reject(pc.change_id, "LLM recommended skip")
                         print(f"      → {_yellow('auto-skipped')}")
             else:
                 print(_yellow("no analysis returned"))
@@ -185,8 +196,8 @@ async def cmd_check(
     print()
 
 
-def cmd_review():
-    items = store.pending()
+async def cmd_review():
+    items = await store.pending()
     if not items:
         print(_green("No pending changes.\n"))
         return
@@ -211,12 +222,12 @@ def cmd_review():
                 print()
                 return
             if inp == "y":
-                if store.approve(pc.change_id):
+                if await store.approve(pc.change_id):
                     print(_green(f"  ✓ {pc.change_id} approved\n"))
                 break
             elif inp == "n":
                 reason = input("  reason (optional): ").strip()
-                if store.reject(pc.change_id, reason):
+                if await store.reject(pc.change_id, reason):
                     print(_red(f"  ✗ {pc.change_id} rejected\n"))
                 break
             elif inp == "v":
@@ -226,13 +237,13 @@ def cmd_review():
                 print("  enter y / n / v")
 
 
-def cmd_apply():
-    items = [i for i in store.list_all() if i.status == "approved"]
+async def cmd_apply():
+    all_items = await store.list_all()
+    items = [i for i in all_items if i.status == "approved"]
     if not items:
         print(_yellow("No approved changes to apply.\n"))
         return
 
-    import os
     import yaml
 
     config_path = CONFIG_PATH
@@ -257,7 +268,6 @@ def cmd_apply():
     if applied:
         with open(config_path, "w") as f:
             yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-        store._save()
         print(
             _green(f"\n  ✓ {applied} change(s) applied to {config_path}\n")
         )
@@ -302,8 +312,8 @@ def _find_model_entry(model_list: list[dict], name: str) -> Optional[dict]:
     return None
 
 
-def cmd_status():
-    all_items = store.list_all()
+async def cmd_status():
+    all_items = await store.list_all()
     if not all_items:
         print(_yellow("No change records.\n"))
         return
@@ -318,7 +328,8 @@ def cmd_status():
         print(f"  {status_color(pc.summary())}")
         for ch in pc.changes:
             print(f"    · {ch.description[:100]}")
-    print()
+    async_store_type = "postgres" if "PostgresStore" in type(store).__name__ else "json"
+    print(f"  store: {async_store_type}  |  notifier: {notifier.summarize_channels()}\n")
 
 
 async def cmd_daemon(
@@ -327,7 +338,10 @@ async def cmd_daemon(
     webhook_url: Optional[str] = None,
     llm_model: Optional[str] = None,
 ):
-    print(_cyan(f"\n=== Daemon mode — checking every {interval}s ===\n"))
+    channels = notifier.summarize_channels()
+    print(_cyan(f"\n=== Daemon mode — checking every {interval}s ==="))
+    print(f"  store: {'postgres' if 'PostgresStore' in type(store).__name__ else 'json'}")
+    print(f"  notifier: {channels}\n")
     while True:
         try:
             await cmd_check(analyze=analyze, llm_model=llm_model)
@@ -381,11 +395,11 @@ def main():
         if cmd == "check":
             asyncio.run(cmd_check(**flags))
         elif cmd == "review":
-            cmd_review()
+            asyncio.run(cmd_review())
         elif cmd == "apply":
-            cmd_apply()
+            asyncio.run(cmd_apply())
         elif cmd == "status":
-            cmd_status()
+            asyncio.run(cmd_status())
         elif cmd == "daemon":
             asyncio.run(cmd_daemon(**flags))
         elif cmd == "serve":
