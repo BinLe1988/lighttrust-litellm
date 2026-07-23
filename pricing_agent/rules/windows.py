@@ -76,6 +76,12 @@ class PerUserWindows:
             w = user.setdefault(f"spend_{secs}", SlidingWindow(secs))
             w.add(amount)
 
+    def add_tokens(self, uid: str, count: int):
+        for secs in self._windows_secs:
+            user = self._data.setdefault(uid, {})
+            w = user.setdefault(f"token_{secs}", SlidingWindow(secs))
+            w.add(float(count))
+
     def add_request(self, uid: str, is_error: bool = False):
         for secs in self._windows_secs:
             user = self._data.setdefault(uid, {})
@@ -104,6 +110,18 @@ class PerUserWindows:
             return 0.0
         return w.count / req.count if w else 0.0
 
+    def token_rate_short(self, uid: str) -> float:
+        w = self._data.get(uid, {}).get(f"token_{self._windows_secs[0]}")
+        return w.rate if w else 0.0
+
+    def token_rate_long(self, uid: str) -> float:
+        w = self._data.get(uid, {}).get(f"token_{self._windows_secs[-1]}")
+        return w.rate if w else 0.0
+
+    def total_tokens_short(self, uid: str) -> int:
+        w = self._data.get(uid, {}).get(f"token_{self._windows_secs[0]}")
+        return int(w.sum) if w else 0
+
     def count_short(self, uid: str) -> int:
         w = self._data.get(uid, {}).get(f"req_{self._windows_secs[0]}")
         return w.count if w else 0
@@ -130,6 +148,9 @@ class PerUserWindows:
             request_rate=self.request_rate(uid),
             request_rate_baseline=0.0,
             error_rate=self.error_rate(uid),
+            token_rate=self.token_rate_short(uid),
+            token_rate_baseline=self.token_rate_long(uid),
+            total_tokens=self.total_tokens_short(uid),
             request_count=self.count_short(uid),
             days_elapsed=days_elapsed,
             days_in_month=days_in_month,

@@ -118,3 +118,53 @@ rules:
       - action: degrade
         throttle_pct: 0.5
     cooldown: 1800
+
+
+  # ── ④ Token 级别限流 ────────────────────────────────────────
+  - name: team_tpm_limit
+    description: 每分钟 token 消耗量超过上游 TPM 阈值时降级
+    enabled: true
+    type: rate_limit
+    condition:
+      metric: token_rate
+      operator: ">="
+      value: 50000.0    # 50K tokens/min ≈ 833 tokens/s
+    actions:
+      - action: notify
+        channels: ["dingtalk"]
+        message: "⚠️ {{ user_id }} TPM 达到 {{ token_rate:.0f }} tokens/s，接近上游限制"
+      - action: degrade
+        throttle_pct: 0.4
+    cooldown: 300
+
+  - name: team_daily_token_cap
+    description: 每日 token 总量超过软上限时告警+降级
+    enabled: true
+    type: budget_threshold
+    condition:
+      metric: total_tokens
+      operator: ">="
+      value: 5000000.0   # 5M tokens/day 软上限
+    actions:
+      - action: notify
+        channels: ["dingtalk", "slack"]
+        message: "📊 {{ user_id }} 今日 token 消耗 {{ total_tokens:.0f }}，超过日上限"
+      - action: degrade
+        throttle_pct: 0.5
+    cooldown: 3600
+
+  - name: anomaly_token_spike
+    description: token 速率异常飙升（>4x 基线）
+    enabled: true
+    type: anomaly
+    condition:
+      metric: token_rate
+      multiplier: 4.0
+      min_samples: 5
+    actions:
+      - action: notify
+        channels: ["dingtalk"]
+        message: "🚨 {{ user_id }} token 消耗速率异常: {{ token_rate:.0f }}/s（基线 {{ token_rate_baseline:.0f }}/s）"
+      - action: degrade
+        throttle_pct: 0.3
+    cooldown: 1800

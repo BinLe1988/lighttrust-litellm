@@ -58,6 +58,11 @@ class RuleContext:
     error_rate_baseline: float = 0.0
     avg_latency: float = 0.0
 
+    token_rate: float = 0.0          # tokens/sec (short window)
+    token_rate_baseline: float = 0.0 # tokens/sec (long window)
+    total_tokens: int = 0            # cumulative in current period
+    daily_tokens: int = 0            # tokens today
+
     request_count: int = 0
     error_count: int = 0
     days_in_month: int = 30

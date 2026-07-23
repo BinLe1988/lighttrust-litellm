@@ -261,6 +261,10 @@ class BudgetTracker(CustomLogger):
         metadata = litellm_params.get("metadata") or {}
         user_id = metadata.get("user_id", "default")
 
+        # token 消耗量（用于 token 级别限流）
+        usage = kwargs.get("usage") or {}
+        total_tokens = (usage.get("total_tokens", 0) or 0) if isinstance(usage, dict) else 0
+
         # 更新花销
         budget = self._get_budget(user_id)
         if budget is not None:
@@ -275,6 +279,7 @@ class BudgetTracker(CustomLogger):
             is_error = response_cost <= 0
 
             _WINDOWS.add_spend(user_id, response_cost)
+            _WINDOWS.add_tokens(user_id, total_tokens)
             _WINDOWS.add_request(user_id, is_error)
 
             now = __import__("time").time()

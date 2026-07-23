@@ -87,7 +87,9 @@ def _resolve_metric(metric: str, ctx: RuleContext) -> float:
         "daily_spend": ctx.daily_spend,
         "monthly_spend": ctx.monthly_spend,
         "predicted_monthly_spend": ctx.predicted_monthly_spend,
-        "avg_latency": ctx.avg_latency,
+            "avg_latency": ctx.avg_latency,
+        "token_rate": ctx.token_rate,
+        "total_tokens": float(ctx.total_tokens),
     }
     return m.get(metric, 0.0)
 
@@ -97,6 +99,7 @@ def _resolve_baseline(metric: str, ctx: RuleContext) -> float:
         "spend_rate": ctx.spend_rate_baseline,
         "request_rate": ctx.request_rate_baseline,
         "error_rate": ctx.error_rate_baseline,
+        "token_rate": ctx.token_rate_baseline,
     }
     return m.get(metric, 0.0)
 
