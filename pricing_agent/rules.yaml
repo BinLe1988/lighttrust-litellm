@@ -104,7 +104,7 @@ rules:
     cooldown: 1800
 
   - name: anomaly_request_spike
-    description: 请求量异常飙升（>5x 基线）
+    description: 请求量异常飙升（>5x 基线，仅通知不降级，由 token 级别接管动作）
     enabled: true
     type: anomaly
     condition:
@@ -115,8 +115,6 @@ rules:
       - action: notify
         channels: ["dingtalk"]
         message: "🚨 {{ user_id }} 请求量异常飙升: {{ request_rate:.2f }}/s"
-      - action: degrade
-        throttle_pct: 0.5
     cooldown: 1800
 
 
