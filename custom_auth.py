@@ -29,6 +29,50 @@ _RULES_ENGINE = None
 _WINDOWS = None
 _FIRST_SEEN: dict[str, float] = {}
 
+# ── 花销校准系数 ──────────────────────────────────────────────────
+_CALIBRATION_FACTORS: dict[str, float] = {}
+_CALIBRATION_MTIME: float = 0
+
+def _load_calibration_factors():
+    global _CALIBRATION_FACTORS, _CALIBRATION_MTIME
+    path = os.environ.get(
+        "CALIBRATION_FILE",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "calibration_factors.json"),
+    )
+    try:
+        mtime = os.path.getmtime(path)
+        if mtime <= _CALIBRATION_MTIME:
+            return
+        with open(path) as f:
+            raw = json.load(f)
+        factors = {}
+        for key, val in raw.items():
+            factor = val.get("factor", 1.0)
+            if factor != 1.0:
+                factors[key] = factor
+        _CALIBRATION_FACTORS = factors
+        _CALIBRATION_MTIME = mtime
+        if factors:
+            logger = __import__("logging").getLogger("custom_auth.calibrate")
+            logger.info("Loaded %d calibration factors", len(factors))
+    except (FileNotFoundError, json.JSONDecodeError):
+        _CALIBRATION_FACTORS = {}
+        _CALIBRATION_MTIME = 0
+
+def _apply_calibration(model: str, cost: float) -> float:
+    if not _CALIBRATION_FACTORS:
+        return cost
+    # Try exact match, then suffix match
+    factor = _CALIBRATION_FACTORS.get(model)
+    if factor is None:
+        for key, f in _CALIBRATION_FACTORS.items():
+            if model.endswith(key) or key.endswith(model):
+                factor = f
+                break
+    if factor is not None and factor != 1.0:
+        return cost * factor
+    return cost
+
 try:
     from pricing_agent.rules.engine import RuleEngine
     from pricing_agent.rules.windows import PerUserWindows
@@ -261,24 +305,35 @@ class BudgetTracker(CustomLogger):
         metadata = litellm_params.get("metadata") or {}
         user_id = metadata.get("user_id", "default")
 
+        # 校准花销（根据官方账单修正 response_cost）
+        _load_calibration_factors()
+        model = litellm_params.get("model", "")
+        calibrated_cost = _apply_calibration(model, response_cost)
+        if calibrated_cost != response_cost:
+            logger = __import__("logging").getLogger("custom_auth.calibrate")
+            logger.debug(
+                "Calibrated %s: %.6f → %.6f (factor=%.4f)",
+                model, response_cost, calibrated_cost,
+                calibrated_cost / max(response_cost, 1e-12),
+            )
+
         # token 消耗量（用于 token 级别限流）
         usage = kwargs.get("usage") or {}
         total_tokens = (usage.get("total_tokens", 0) or 0) if isinstance(usage, dict) else 0
 
-        # 更新花销
+        # 更新花销（使用校准后的 cost）
         budget = self._get_budget(user_id)
         if budget is not None:
             async with self._lock:
-                self._spend[user_id] = self._spend.get(user_id, 0.0) + response_cost
+                self._spend[user_id] = self._spend.get(user_id, 0.0) + calibrated_cost
                 await self._persist()
 
         # 规则引擎 post 评估（滑动窗口 + 预算预测 / 异常检测）
         if _RULES_ENGINE and _WINDOWS:
-            model = litellm_params.get("model", "")
             provider = litellm_params.get("custom_llm_provider", "")
-            is_error = response_cost <= 0
+            is_error = calibrated_cost <= 0
 
-            _WINDOWS.add_spend(user_id, response_cost)
+            _WINDOWS.add_spend(user_id, calibrated_cost)
             _WINDOWS.add_tokens(user_id, total_tokens)
             _WINDOWS.add_request(user_id, is_error)
 

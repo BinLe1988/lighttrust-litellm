@@ -229,26 +229,56 @@ class InternalCollector:
     def __init__(self, lf: Optional[LangfuseClient] = None):
         self._lf = lf
 
+    def _batch_generations(self, days: int, provider: str = "") -> dict[str, list[dict]]:
+        """批量获取所有 generations, 按 traceId 索引 (避免 N+1)。"""
+        import time as _time
+        now = datetime.now(timezone.utc)
+        since = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+        indexed: dict[str, list[dict]] = {}
+        page = 1
+        while True:
+            data = self._lf.list_observations(
+                limit=100, page=page,
+                from_timestamp=since,
+                observation_type="GENERATION",
+            )
+            items = data.get("data", [])
+            if not items:
+                break
+            for gen in items:
+                tid = gen.get("traceId")
+                if not tid:
+                    continue
+                model = gen.get("model", "unknown")
+                if provider and provider not in model:
+                    continue
+                indexed.setdefault(tid, []).append(gen)
+            meta = data.get("meta", {})
+            total_pages = meta.get("totalPages", 1) or 1
+            if page >= total_pages:
+                break
+            page += 1
+            _time.sleep(3.0)
+        return indexed
+
     def from_langfuse(
         self,
         days: int = 30,
         provider: str = "",
     ) -> list[InternalCostSlice]:
-        """从 Langfuse 聚合模型级成本。"""
-        slices: dict[str, InternalCostSlice] = {}
+        """从 Langfuse 聚合模型级成本（批量查询，无 N+1）。"""
         if not self._lf:
             return []
 
-        traces = self._lf.traces_in_period(days)
-        for t in traces:
-            gens = self._lf.generations_for_trace(t.get("id", ""))
+        gens_indexed = self._batch_generations(days, provider)
+        slices: dict[str, InternalCostSlice] = {}
+
+        for trace_id, gens in gens_indexed.items():
             for gen in gens:
                 model = gen.get("model", "unknown")
                 cost = gen.get("cost", 0) or 0
                 usage = gen.get("usage", {}) or {}
                 tokens = (usage.get("totalTokens", 0) or 0) if isinstance(usage, dict) else 0
-                if provider and provider not in model:
-                    continue
                 key = model
                 if key not in slices:
                     slices[key] = InternalCostSlice(
