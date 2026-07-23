@@ -59,6 +59,15 @@ def main():
     # rollbacks
     sub.add_parser("rollbacks", help="Check rollback monitor status")
 
+    # calibrate
+    cal_p = sub.add_parser("calibrate", help="Run bill calibration (official vs internal)")
+    cal_p.add_argument("--days", type=int, default=30, help="Lookback days")
+    cal_p.add_argument("--provider", default="", help="Filter by provider")
+    cal_p.add_argument("--csv", default="", help="Path to official billing CSV")
+    cal_p.add_argument("--json-bills", default="", help="Path to official billing JSON")
+    cal_p.add_argument("--auto", action="store_true", help="Enable auto-calibration")
+    cal_p.add_argument("--json", action="store_true", help="Output as JSON")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -74,6 +83,8 @@ def main():
         _audit(args)
     elif args.command == "rollbacks":
         _rollbacks()
+    elif args.command == "calibrate":
+        _calibrate(args)
 
 
 def _run(args):
@@ -203,6 +214,49 @@ def _print_results(result: dict):
             print(f"  {r['reason']}")
 
     print(f"\n{'='*60}\n")
+
+
+def _calibrate(args):
+    """Run calibration: official bills vs Langfuse vs BudgetTracker."""
+    from pricing_agent.strategy.calibrate import (
+        BillCalibrator, OfficialBillFetcher, CalibrationReport,
+    )
+    from pricing_agent.strategy.langfuse import LangfuseClient, LangfuseConfig
+
+    cfg = LangfuseConfig()
+    lf = LangfuseClient(cfg)
+
+    try:
+        cal = BillCalibrator(lf_client=lf)
+
+        # Load official bills from CSV / JSON if provided
+        official_bills = []
+        if args.csv:
+            official_bills = OfficialBillFetcher.from_csv(args.csv)
+            print(f"Loaded {len(official_bills)} records from CSV")
+        if args.json_bills:
+            official_bills = OfficialBillFetcher.from_json(args.json_bills)
+            print(f"Loaded {len(official_bills)} records from JSON")
+
+        report = cal.compare(
+            official_bills=official_bills if official_bills else None,
+            days=args.days,
+            provider=args.provider,
+        )
+
+        if args.json:
+            print(json.dumps({
+                "report_id": report.report_id,
+                "period_days": report.period_days,
+                "auto_calibrated": report.auto_calibrated,
+                "drift_results": [dr.__dict__ for dr in report.drift_results],
+                "calibration_updates": report.calibration_updates,
+                "summary": report.summary,
+            }, indent=2, default=str, ensure_ascii=False))
+        else:
+            BillCalibrator.print_report(report)
+    finally:
+        lf.close()
 
 
 if __name__ == "__main__":
