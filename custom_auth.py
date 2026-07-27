@@ -23,6 +23,7 @@ import random
 from typing import Optional
 from fastapi import HTTPException
 from litellm.integrations.custom_logger import CustomLogger
+from router import route as _route_prompt, RoutingDecision, load_config as _load_routing_config
 
 # ── 可选的规则引擎 ────────────────────────────────────────────────
 _RULES_ENGINE = None
@@ -77,7 +78,6 @@ try:
     from pricing_agent.rules.engine import RuleEngine
     from pricing_agent.rules.windows import PerUserWindows
     from pricing_agent.rules.models import RuleContext
-    from pricing_agent.router import route as _route_prompt, RoutingDecision, load_config as _load_routing_config
 
     _rules_path = os.environ.get("RULES_PATH", "")
     if not _rules_path:
