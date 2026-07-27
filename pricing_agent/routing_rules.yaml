@@ -1,0 +1,79 @@
+# ── Prompt Routing 规则 ─────────────────────────────────────────
+#
+# 此文件由以下两个途径更新：
+#   1. 手动编辑（hot-reload，按 mtime 自动检测）
+#   2. 策略闭环自动优化（strategy loop 执行提案后更新）
+#
+# categories 按 priority 降序匹配（priority 越高越优先检查）。
+
+routing:
+  default_model: deepseek-v4-flash
+
+  # LLM 分类器配置（默认空=不使用 LLM 分类，仅用启发式）
+  llm_classifier_model: ""
+  llm_classifier_prompt: >
+    Classify this user message into exactly one category:
+    simple, complex, chinese, creative, agentic.
+    simple = greeting, basic Q&A, short factual query
+    complex = code, math, reasoning, multi-step instructions
+    chinese = message is primarily in Chinese language
+    creative = writing, poetry, storytelling, brainstorming
+    agentic = task delegation, tool use, multi-turn workflow
+    Reply with only the category name, nothing else.
+
+  categories:
+    # ── 中文优先 → 本地模型 ──
+    - name: chinese
+      model: bedi/glm-4.7
+      priority: 100
+      conditions:
+        - type: language
+          value: zh
+
+    # ── 代码/技术 → 最强模型 ──
+    - name: complex
+      model: deepseek-v4-pro
+      priority: 90
+      conditions:
+        - type: has_code
+          value: true
+
+    # ── 长文技术问题（无代码但涉及技术概念） ──
+    - name: complex
+      model: deepseek-v4-pro
+      priority: 85
+      conditions:
+        - type: has_code
+          value: false
+        - type: min_length
+          value: 100
+        - type: has_creative
+          value: false
+
+    # ── 创意写作 → flash 够用 ──
+    - name: creative
+      model: deepseek-v4-flash
+      priority: 60
+      conditions:
+        - type: has_creative
+          value: true
+
+    # ── 简短查询 → flash 够用 ──
+    - name: simple
+      model: deepseek-v4-flash
+      priority: 40
+      conditions:
+        - type: max_length
+          value: 200
+        - type: has_code
+          value: false
+        - type: has_creative
+          value: false
+
+    # ── 超长 + 无代码 → pro 处理 ──
+    - name: complex
+      model: deepseek-v4-pro
+      priority: 20
+      conditions:
+        - type: min_length
+          value: 1000

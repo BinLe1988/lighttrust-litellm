@@ -87,9 +87,12 @@ def _resolve_metric(metric: str, ctx: RuleContext) -> float:
         "daily_spend": ctx.daily_spend,
         "monthly_spend": ctx.monthly_spend,
         "predicted_monthly_spend": ctx.predicted_monthly_spend,
-            "avg_latency": ctx.avg_latency,
+        "avg_latency": ctx.avg_latency,
         "token_rate": ctx.token_rate,
         "total_tokens": float(ctx.total_tokens),
+        "routing_accuracy": ctx.routing_accuracy,
+        "routing_efficiency": ctx.routing_efficiency,
+        "routing_requests": float(ctx.routing_requests),
     }
     return m.get(metric, 0.0)
 
@@ -104,11 +107,32 @@ def _resolve_baseline(metric: str, ctx: RuleContext) -> float:
     return m.get(metric, 0.0)
 
 
+def _eval_prompt_route(cond: Condition, ctx: RuleContext) -> tuple[bool, str]:
+    """prompt_route — 监控路由效果。
+
+    在 strategy loop 中用于评估路由质量，非在线调用。
+    使用 metrics:
+      routing_accuracy  — 路由准确率（来自 Langfuse scores）
+      routing_efficiency — 路由后平均成本 vs 基线
+      routing_error_rate — 路由后错误率
+    """
+    metric = cond.metric
+    actual = _resolve_metric(metric, ctx)
+    ops = {">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b}
+    fn = ops.get(cond.operator)
+    if not fn:
+        return False, f"unknown operator {cond.operator}"
+    fired = fn(actual, cond.value)
+    msg = f"{metric}={actual:.4f} {cond.operator} {cond.value} → {'fired' if fired else 'ok'}"
+    return fired, msg
+
+
 EVALUATORS: dict[str, Evaluator] = {
     "budget_threshold": _eval_threshold,
     "budget_prediction": _eval_prediction,
     "anomaly": _eval_anomaly,
     "rate_limit": _eval_threshold,
+    "prompt_route": _eval_prompt_route,
 }
 
 

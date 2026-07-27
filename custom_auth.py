@@ -77,6 +77,7 @@ try:
     from pricing_agent.rules.engine import RuleEngine
     from pricing_agent.rules.windows import PerUserWindows
     from pricing_agent.rules.models import RuleContext
+    from pricing_agent.router import route as _route_prompt, RoutingDecision, load_config as _load_routing_config
 
     _rules_path = os.environ.get("RULES_PATH", "")
     if not _rules_path:
@@ -137,6 +138,76 @@ class MetadataValidator(CustomLogger):
                         }
                     },
                 )
+
+        return data
+
+
+# ── PromptRouter（基于内容的动态路由）────────────────────────────
+
+def _get_last_user_message(data: dict) -> str:
+    messages = data.get("messages") or []
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            content = m.get("content", "")
+            if isinstance(content, list):
+                texts = [c.get("text", "") for c in content if c.get("type") == "text"]
+                content = " ".join(texts)
+            return str(content)
+    return ""
+
+
+class PromptRouter(CustomLogger):
+    """根据 prompt 内容自动选择最优模型。
+
+    运行在 BudgetTracker 之前，仅做模型改写；预算/降级检查由
+    BudgetTracker 后续处理（职责分离）。
+
+    不改写条件:
+      - 用户显式指定 model（非空/非 default）
+      - call_type 不是 completion
+    """
+
+    async def async_pre_call_hook(
+        self,
+        user_api_key_dict,
+        cache,
+        data: dict,
+        call_type: str,
+    ):
+        if call_type not in ("completion",):
+            return data
+
+        # 用户显式指定了模型 → 跳过路由
+        original_model = data.get("model", "")
+        if original_model and original_model not in ("", "default", "auto"):
+            return data
+
+        messages = data.get("messages", [])
+        if not messages:
+            return data
+
+        method = os.environ.get("ROUTING_METHOD", "heuristic")
+        try:
+            decision: RoutingDecision = _route_prompt(
+                messages=messages,
+                original_model=original_model,
+                method=method,
+            )
+        except Exception as exc:
+            __import__("logging").getLogger("custom_auth.router").warning(
+                "Routing failed: %s", exc,
+            )
+            return data
+
+        data["model"] = decision.assigned_model
+
+        metadata = data.get("metadata") or {}
+        metadata["routing_method"] = decision.method
+        metadata["routing_category"] = decision.category
+        metadata["routing_confidence"] = decision.confidence
+        metadata["routing_original_model"] = original_model
+        metadata["routing_assigned_model"] = decision.assigned_model
+        data["metadata"] = metadata
 
         return data
 
@@ -374,3 +445,4 @@ class BudgetTracker(CustomLogger):
 # 模块级实例 — litellm 的 get_instance_fn 通过 getattr(module, name) 获取，必须返回实例
 validator = MetadataValidator()
 tracker = BudgetTracker()
+router = PromptRouter()

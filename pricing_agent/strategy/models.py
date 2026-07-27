@@ -75,6 +75,22 @@ class AnomalySignal:
     detected_at: str = ""
 
 
+@dataclass
+class RoutingQualitySignal:
+    """路由质量信号 — 策略闭环评估 Prompt Routing 效果。"""
+    team_id: str
+    feature: str
+    period_days: int
+    total_routed: int
+    accuracy: float                  # 路由准确率 0-1
+    avg_cost_per_request: float
+    avg_cost_savings: float          # 相对不路由的节省
+    misroute_by_category: dict[str, int] = field(default_factory=dict)
+    category_distribution: dict[str, int] = field(default_factory=dict)
+    top_errors: list[str] = field(default_factory=list)
+    confidence: str = "medium"
+
+
 # ── ② 变更提案 ─────────────────────────────────────────────────
 
 PROPOSAL_TYPES = [
@@ -83,6 +99,7 @@ PROPOSAL_TYPES = [
     "model_fallback",
     "budget_alert",
     "manual_review_required",
+    "routing_rule_update",
 ]
 
 RISK_LEVELS = ["low", "medium", "high"]

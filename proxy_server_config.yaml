@@ -24,6 +24,7 @@ litellm_settings:
   telemetry: false
   success_callback: ["langfuse"]
   callbacks:
+    - custom_auth.router
     - custom_auth.validator
     - custom_auth.tracker
 

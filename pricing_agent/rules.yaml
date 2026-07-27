@@ -166,3 +166,35 @@ rules:
       - action: degrade
         throttle_pct: 0.3
     cooldown: 1800
+
+
+  # ── ⑤ Prompt Routing 监控 ───────────────────────────────────
+  - name: routing_accuracy_low
+    description: 路由准确率低于阈值时告警
+    enabled: true
+    type: prompt_route
+    condition:
+      metric: routing_accuracy
+      operator: "<="
+      value: 0.7
+      min_samples: 50
+    actions:
+      - action: notify
+        channels: ["dingtalk"]
+        message: "⚠️ 路由准确率 {{ routing_accuracy:.0% }}（<70%），建议检查 routing_rules.yaml"
+    cooldown: 86400
+
+  - name: routing_efficiency_drop
+    description: 路由后成本效率下降时告警
+    enabled: true
+    type: prompt_route
+    condition:
+      metric: routing_efficiency
+      operator: ">="
+      value: 0.05
+      min_samples: 50
+    actions:
+      - action: notify
+        channels: ["dingtalk"]
+        message: "📊 路由后平均成本 ${{ routing_efficiency:.4f }}，可能路由策略需要优化"
+    cooldown: 86400

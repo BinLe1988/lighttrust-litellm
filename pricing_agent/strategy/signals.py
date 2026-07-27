@@ -25,6 +25,7 @@ from .models import (
     TeamEfficiencyMetrics,
     ModelSelectionSignal,
     AnomalySignal,
+    RoutingQualitySignal,
     ANOMALY_CATEGORIES,
 )
 from .langfuse import LangfuseClient
@@ -285,6 +286,106 @@ class SignalAggregator:
                                 request_count=current["count"],
                             ))
         return signals
+
+    # ── ④ Prompt Routing 质量评估 ─────────────────────────
+
+    def routing_quality_signals(
+        self,
+        team_id: str = "",
+        days: int = 7,
+    ) -> list[RoutingQualitySignal]:
+        """分析路由决策质量。
+
+        从 Langfuse 找出含有 routing_* metadata 的 trace，
+        评估:
+          - 各 category 的分布
+          - 路由后的成本效率
+          - 路由错误模式（基于 score / error）
+        """
+        traces = self._build_trace_index(days)
+        generations = self._batch_generations(days)
+        scores = self._batch_scores(days)
+
+        grouped: dict[str, dict] = defaultdict(lambda: {
+            "routed": 0, "total": 0,
+            "cost_routed": 0.0, "cost_total": 0.0,
+            "errors_routed": 0, "errors_total": 0,
+            "categories": defaultdict(int),
+            "misroutes": defaultdict(int),
+            "error_messages": [],
+        })
+
+        for tid, t in traces.items():
+            md = t.get("metadata") or {}
+            tid_team = md.get("team_id", "default")
+            if team_id and tid_team != team_id:
+                continue
+            feat = md.get("feature", "general")
+            key = f"{tid_team}:{feat}"
+            g = grouped[key]
+            g["total"] += 1
+
+            is_routed = bool(md.get("routing_method"))
+            if is_routed:
+                g["routed"] += 1
+                cat = md.get("routing_category", "unknown")
+                g["categories"][cat] += 1
+
+                trace_scores = scores.get(tid, [])
+                for sc in trace_scores:
+                    if sc.get("name", "").startswith("routing_"):
+                        val = sc.get("value", 0)
+                        if val is not None and val < 0.5:
+                            g["misroutes"][cat] += 1
+                            g["error_messages"].append(
+                                f"trace={tid} category={cat} score={val}"
+                            )
+
+            for gen in generations.get(tid, []):
+                cost = gen.get("cost", 0) or 0
+                if is_routed:
+                    g["cost_routed"] += cost
+                g["cost_total"] += cost
+
+            if t.get("status") == "ERROR":
+                if is_routed:
+                    g["errors_routed"] += 1
+                g["errors_total"] += 1
+
+        results = []
+        for key, g in grouped.items():
+            tid_name, feat = key.split(":", 1)
+            if g["routed"] < 10:
+                continue
+            accuracy = 1.0
+            total_misroutes = sum(g["misroutes"].values())
+            if g["routed"] > 0:
+                accuracy = max(0.0, 1.0 - total_misroutes / g["routed"])
+            avg_cost = g["cost_routed"] / max(g["routed"], 1)
+            avg_cost_all = g["cost_total"] / max(g["total"], 1)
+            savings = max(0.0, avg_cost_all - avg_cost)
+
+            confidence = "high"
+            if g["routed"] < 50:
+                confidence = "medium"
+            if g["routed"] < 20:
+                confidence = "low"
+
+            results.append(RoutingQualitySignal(
+                team_id=tid_name,
+                feature=feat,
+                period_days=days,
+                total_routed=g["routed"],
+                accuracy=round(accuracy, 4),
+                avg_cost_per_request=round(avg_cost, 6),
+                avg_cost_savings=round(savings, 6),
+                misroute_by_category=dict(g["misroutes"]),
+                category_distribution=dict(g["categories"]),
+                top_errors=g["error_messages"][:5],
+                confidence=confidence,
+            ))
+
+        return results
 
     # ── ③ 异常模式检测 ──────────────────────────────────────
 

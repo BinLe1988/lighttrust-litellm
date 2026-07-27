@@ -16,6 +16,7 @@ from .models import (
     RollbackCondition,
     ModelSelectionSignal,
     AnomalySignal,
+    RoutingQualitySignal,
     TeamEfficiencyMetrics,
 )
 
@@ -146,6 +147,66 @@ class ProposalEngine:
         )
         return proposal
 
+    # ── routing: routing quality issues ─────────────────────────
+
+    def from_routing(
+        self,
+        signal: RoutingQualitySignal,
+    ) -> Optional[ChangeProposal]:
+        """当路由准确率或效率低于阈值时，建议更新 routing_rules.yaml。"""
+        if signal.accuracy >= 0.85 and signal.avg_cost_savings >= 0:
+            return None  # 路由运行良好，无需提案
+
+        risk = "low"
+        approval = "none"
+        if signal.accuracy < 0.6:
+            risk = "high"
+            approval = "admin"
+        elif signal.accuracy < 0.75:
+            risk = "medium"
+            approval = "team_lead"
+
+        # 构造路由优化建议
+        worst_cat = max(signal.misroute_by_category.items(), key=lambda x: x[1])[0] \
+            if signal.misroute_by_category else "unknown"
+
+        proposal = ChangeProposal.new(
+            proposal_type="routing_rule_update",
+            target={
+                "team_id": signal.team_id,
+                "feature": signal.feature,
+                "worst_category": worst_cat,
+                "accuracy": signal.accuracy,
+                "avg_cost": signal.avg_cost_per_request,
+            },
+            current_state=(
+                f"路由准确率 {signal.accuracy:.0%}, "
+                f"平均每请求 ${signal.avg_cost_per_request:.6f}"
+            ),
+            suggested_state=(
+                f"优化 {worst_cat} 分类条件, "
+                f"预期节省 ${signal.avg_cost_savings:.6f}/请求"
+            ),
+            risk_level=risk,
+            expected_savings=signal.avg_cost_savings * signal.total_routed * 30,
+            supporting_signals=[signal],
+            auto_executable=risk == "low",
+            requires_approval=approval,
+            rollback_condition=RollbackCondition(
+                metric="routing_accuracy",
+                drop_pct=10.0,
+                window_hours=48,
+                min_samples=20,
+            ),
+        )
+        self._proposals.append(proposal)
+        logger.info(
+            "Proposal %s: routing update for %s/%s (acc=%.0f%%)",
+            proposal.proposal_id, signal.team_id, signal.feature,
+            signal.accuracy * 100,
+        )
+        return proposal
+
     # ── batch generation ───────────────────────────────────────
 
     def generate_all(
@@ -153,6 +214,7 @@ class ProposalEngine:
         efficiency_signals: Optional[list] = None,
         model_signals: Optional[list[ModelSelectionSignal]] = None,
         anomaly_signals: Optional[list[AnomalySignal]] = None,
+        routing_signals: Optional[list[RoutingQualitySignal]] = None,
     ) -> list[ChangeProposal]:
         """Generate all proposals from all signal types."""
         self._proposals = []
@@ -167,6 +229,10 @@ class ProposalEngine:
                 if s.anomaly_type == "model_overqualified":
                     continue
                 self.from_anomaly(s)
+
+        if routing_signals:
+            for s in routing_signals:
+                self.from_routing(s)
 
         return self._proposals
 

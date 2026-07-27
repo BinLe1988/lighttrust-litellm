@@ -68,6 +68,11 @@ class RuleContext:
     days_in_month: int = 30
     days_elapsed: int = 1
 
+    # 路由指标（由 strategy/signals.py routing_quality_signals 写入）
+    routing_accuracy: float = 0.0       # 路由准确率 0-1
+    routing_efficiency: float = 0.0     # 路由后每请求平均成本
+    routing_requests: int = 0           # 被路由的请求数
+
     @property
     def spend_ratio(self) -> float:
         b = self.max_budget or self.default_budget or 1.0
