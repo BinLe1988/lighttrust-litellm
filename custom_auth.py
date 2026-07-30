@@ -24,6 +24,7 @@ from typing import Optional
 from fastapi import HTTPException
 from litellm.integrations.custom_logger import CustomLogger
 from router import route as _route_prompt, RoutingDecision, load_config as _load_routing_config
+from pricing_agent.pricing_tier import calculate_request_cost, get_tier, PricedRequest, DEFAULT_TIER
 
 # ── 可选的规则引擎 ────────────────────────────────────────────────
 _RULES_ENGINE = None
@@ -392,19 +393,40 @@ class BudgetTracker(CustomLogger):
         usage = kwargs.get("usage") or {}
         total_tokens = (usage.get("total_tokens", 0) or 0) if isinstance(usage, dict) else 0
 
-        # 更新花销（使用校准后的 cost）
+        # 价值定价 — 按 tier 乘数 + SLA 折扣修正 cost
+        tier = metadata.get("tier", os.environ.get("DEFAULT_TIER", DEFAULT_TIER))
+        quality_score = metadata.get("quality_score")  # 可选，由客户端或评测系统注入
+        latency_ms = 0.0
+        if start_time and end_time:
+            latency_ms = (end_time - start_time).total_seconds() * 1000
+        tier_result = calculate_request_cost(
+            base_cost=calibrated_cost,
+            tier_name=tier,
+            quality_score=quality_score,
+            latency_ms=latency_ms,
+        )
+        effective_cost = tier_result.effective_cost
+        if effective_cost != calibrated_cost:
+            logger = __import__("logging").getLogger("custom_auth.pricing")
+            logger.debug(
+                "Tier %s: %.6f × %.2f × %.4f = %.6f",
+                tier, calibrated_cost, tier_result.tier_multiplier,
+                tier_result.sla_discount, effective_cost,
+            )
+
+        # 更新花销（使用 tier 定价后的 effective_cost）
         budget = self._get_budget(user_id)
         if budget is not None:
             async with self._lock:
-                self._spend[user_id] = self._spend.get(user_id, 0.0) + calibrated_cost
+                self._spend[user_id] = self._spend.get(user_id, 0.0) + effective_cost
                 await self._persist()
 
         # 规则引擎 post 评估（滑动窗口 + 预算预测 / 异常检测）
         if _RULES_ENGINE and _WINDOWS:
             provider = litellm_params.get("custom_llm_provider", "")
-            is_error = calibrated_cost <= 0
+            is_error = effective_cost <= 0
 
-            _WINDOWS.add_spend(user_id, calibrated_cost)
+            _WINDOWS.add_spend(user_id, effective_cost)
             _WINDOWS.add_tokens(user_id, total_tokens)
             _WINDOWS.add_request(user_id, is_error)
 

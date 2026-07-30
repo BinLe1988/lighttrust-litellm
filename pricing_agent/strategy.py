@@ -59,6 +59,12 @@ def main():
     # rollbacks
     sub.add_parser("rollbacks", help="Check rollback monitor status")
 
+    # report
+    report_p = sub.add_parser("report", help="Generate value pricing report")
+    report_p.add_argument("--team-id", default="", help="Filter by team ID")
+    report_p.add_argument("--days", type=int, default=30, help="Lookback days")
+    report_p.add_argument("--json", action="store_true", help="Output as JSON")
+
     # calibrate
     cal_p = sub.add_parser("calibrate", help="Run bill calibration (official vs internal)")
     cal_p.add_argument("--days", type=int, default=30, help="Lookback days")
@@ -83,6 +89,8 @@ def main():
         _audit(args)
     elif args.command == "rollbacks":
         _rollbacks()
+    elif args.command == "report":
+        _report(args)
     elif args.command == "calibrate":
         _calibrate(args)
 
@@ -214,6 +222,45 @@ def _print_results(result: dict):
             print(f"  {r['reason']}")
 
     print(f"\n{'='*60}\n")
+
+
+def _report(args):
+    """生成价值定价对账单。"""
+    from pricing_agent.strategy.langfuse import LangfuseClient, LangfuseConfig
+    from pricing_agent.strategy.signals import SignalAggregator
+    from pricing_agent.pricing_tier import format_report, ValueReport
+    from datetime import datetime, timezone, timedelta
+
+    cfg = LangfuseConfig()
+    lf = LangfuseClient(cfg)
+    try:
+        agg = SignalAggregator(lf)
+        signals = agg.billing_signals(team_id=args.team_id, days=args.days)
+
+        if args.json:
+            print(json.dumps(signals, indent=2, default=str, ensure_ascii=False))
+            return
+
+        now = datetime.now(timezone.utc)
+        for s in signals:
+            report = ValueReport(
+                team_id=s["team_id"],
+                tier=s["tier"],
+                period_start=(now - timedelta(days=s["period_days"])).isoformat(),
+                period_end=now.isoformat(),
+                total_requests=s["total_requests"],
+                total_base_cost=s["total_base_cost"],
+                total_effective_cost=s["total_effective_cost"],
+                tier_premium=s["tier_premium"],
+                sla_discount_total=s["sla_discount_total"],
+                sla_compliance_rate=s["sla_compliance_rate"],
+                avg_latency_ms=s["avg_latency_ms"],
+                estimated_savings_vs_baseline=s["estimated_savings_vs_baseline"],
+            )
+            print(format_report(report))
+            print()
+    finally:
+        lf.close()
 
 
 def _calibrate(args):

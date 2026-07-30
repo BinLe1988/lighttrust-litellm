@@ -194,10 +194,18 @@ class LangfuseClient:
 
     # ── high-level helpers ──────────────────────────────────────
 
+    @staticmethod
+    def _fmt_ts(dt: datetime) -> str:
+        """格式化为 Langfuse ISO datetime（带时区偏移）。"""
+        offset = dt.astimezone().strftime("%z")
+        offset_formatted = f"{offset[:3]}:{offset[3:]}" if offset else "+00:00"
+        return dt.strftime("%Y-%m-%dT%H:%M:%S") + offset_formatted
+
     def traces_in_period(self, days: int = 7, **extra) -> list[dict]:
-        now = datetime.now(timezone.utc)
-        since = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
-        data = self.list_traces(from_timestamp=since, limit=100, **extra)
+        now = datetime.now()
+        since = self._fmt_ts(now - timedelta(days=days + 1))
+        till = self._fmt_ts(now + timedelta(hours=1))
+        data = self.list_traces(from_timestamp=since, to_timestamp=till, limit=100, **extra)
         return data.get("data", [])
 
     def generations_for_trace(self, trace_id: str) -> list[dict]:
