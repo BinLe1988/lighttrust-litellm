@@ -54,7 +54,24 @@ class Executor:
         return self._get("/model/info").get("data", [])
 
     def get_teams(self) -> list[dict]:
-        return self._get("/team/list").get("teams", [])
+        data = self._get("/team/list")
+        if isinstance(data, list):
+            return data
+        return data.get("teams", [])
+
+    def create_team(self, team_alias: str, models: Optional[list] = None) -> str:
+        """Create a litellm team, return its team_id."""
+        payload = {"team_alias": team_alias}
+        if models:
+            payload["models"] = models
+        resp = self._post("/team/new", payload)
+        if isinstance(resp, dict) and resp.get("team_id"):
+            return resp["team_id"]
+        # /team/new 部分返回 wrapped data
+        data = resp.get("data") if isinstance(resp, dict) else None
+        if isinstance(data, dict) and data.get("team_id"):
+            return data["team_id"]
+        raise ValueError(f"/team/new 响应中未找到 team_id: {resp}")
 
     def update_team(self, team_id: str, **updates) -> dict:
         return self._post(f"/team/update", {"team_id": team_id, **updates})
