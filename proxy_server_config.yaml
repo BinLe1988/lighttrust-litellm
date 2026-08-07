@@ -3,10 +3,20 @@ model_list:
     litellm_params:
       model: deepseek/deepseek-v4-flash
       api_key: os.environ/DEEPSEEK_API_KEY
+      input_cost_per_token: 2.7e-7
+      output_cost_per_token: 5.5e-7
+      # cache 命中价 (DeepSeek 风格: 命中=0.26x 输入价)
+      cache_read_input_token_cost: 7.0e-8
+      # cache 创建/miss 价 (DeepSeek 对首次写缓存收更高价, 非命中请求按此计)
+      cache_creation_input_token_cost: 1.1e-6
   - model_name: deepseek-v4-pro
     litellm_params:
       model: deepseek/deepseek-v4-pro
       api_key: os.environ/DEEPSEEK_API_KEY
+      input_cost_per_token: 5.4e-7
+      output_cost_per_token: 1.1e-6
+      cache_read_input_token_cost: 1.4e-7
+      cache_creation_input_token_cost: 2.2e-6
   - model_name: bedi/glm-4.7
     litellm_params:
       model: bedi/glm-4.7

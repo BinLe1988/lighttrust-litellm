@@ -35,6 +35,7 @@ from pricing_agent.strategy.proposals import ProposalEngine
 from pricing_agent.strategy.guardrails import GuardrailEngine
 from pricing_agent.strategy.executor import Executor
 from pricing_agent.strategy.rollback import RollbackManager
+from pricing_agent.strategy.cache_warm import warm_before_switch
 
 # ── 演示参数 ──────────────────────────────────────────────
 DEMO_TEAM = "demo-team"
@@ -49,6 +50,15 @@ COST_PER_CALL_LIGHT = 0.0003
 REQ_COUNT = 3200
 SAVINGS_PCT = 80.0
 SAVINGS_MONTHLY = 38.40
+
+# 演示用高频前缀 (模拟该 feature 在 Langfuse 里被反复命中的 prompt)
+SIMULATED_PREFIXES = [
+    {"prefix": "请总结以下会议纪要的关键决策与行动项：", "count": 2140},
+    {"prefix": "把下面这段客户对话整理成结构化工单：", "count": 1320},
+    {"prefix": "基于以下上下文回答用户问题（不要编造）：", "count": 980},
+    {"prefix": "将下列日志归类并指出异常模式：", "count": 760},
+    {"prefix": "用一句话概括以下文档的主旨：", "count": 540},
+]
 
 # ── 输出辅助 ──────────────────────────────────────────────
 C_RESET = "\033[0m"
@@ -131,6 +141,7 @@ def run_demo(team_id: str, explain: bool, json_out: bool) -> dict:
     team_before = None
     team_after = None
     monitor_state = None
+    warm_report = None
 
     try:
         # ---- 确保 demo 团队存在且处于旗舰模型初始状态 ----
@@ -150,6 +161,13 @@ def run_demo(team_id: str, explain: bool, json_out: bool) -> dict:
 
         # ---- dry-run 校验 ----
         dry = executor.dry_run(proposal)
+
+        # ---- 缓存预热 (切换前, 保证命中侧) ----
+        warm_report = warm_before_switch(
+            target_model=LIGHT,
+            prefixes=SIMULATED_PREFIXES,
+            live=False,  # 演示模型为虚构, 走模拟预热; 生产改为 live=True 真实重放
+        )
 
         # ---- 真实执行切换 ----
         if guard.passed and proposal.auto_executable and dry.success:
@@ -209,6 +227,7 @@ def run_demo(team_id: str, explain: bool, json_out: bool) -> dict:
         "step1_signal": signal.__dict__,
         "step2_proposal": proposal.__dict__,
         "step3_guardrail": guard.__dict__,
+        "step4_cache_warmup": warm_report.__dict__ if warm_report else None,
         "step4_execution": exec_result.__dict__,
         "team_before": team_before,
         "team_after": team_after,
@@ -251,9 +270,17 @@ def run_demo(team_id: str, explain: bool, json_out: bool) -> dict:
     _kv("幅度上限检查", json.dumps(guard.amplitude_check or {}, ensure_ascii=False))
     _kv("审批要求", f"{guard.approval_required} ({guard.approval_hint})")
 
-    _step(4, "现场自动切换 (真实执行)")
+    _step(4, "缓存预热 + 现场自动切换")
     _kv("目标团队", team_before["team_id"] if team_before else team_id)
     _kv("切换前", f"models = {team_before['models'] if team_before else '?'}")
+    if warm_report:
+        _kv("预热模式", warm_report.warmup_mode)
+        _kv("预热前缀", f"{len(warm_report.prefixes_warmed)} 条高频前缀")
+        for p in warm_report.prefixes_warmed[:3]:
+            print(f"      · [{p['count']} 次] {p['prefix']}")
+        _ok(f"目标模型 {LIGHT} 已预热 ({warm_report.successes} 条, 输入 {warm_report.input_tokens_used} tokens)")
+        _ok("保证① 计价侧: cache_read_input_token_cost 已配置 → 命中 token 按折扣计费")
+        _ok("保证② 命中侧: 切换前已重放高频前缀 → 切换后立即命中 cache 价")
     _kv("切换动作", f"POST /team/update → models = [{LIGHT}]")
     if exec_result.success:
         _ok(f"执行成功: {exec_result.action_taken}")
