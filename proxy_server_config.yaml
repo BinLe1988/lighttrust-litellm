@@ -17,6 +17,12 @@ model_list:
       output_cost_per_token: 1.1e-6
       cache_read_input_token_cost: 1.4e-7
       cache_creation_input_token_cost: 2.2e-6
+  - model_name: kimi-k2.5
+    litellm_params:
+      model: openai/kimi-k2.5
+      api_key: sk-qEc5uGVJ9Ie1BRkPs5hmq18z5GmM3HG7xiYcoOQUC8witRYP
+      api_base: https://api.302ai.cn/v1
+      custom_llm_provider: openai
 
 litellm_settings:
   drop_params: true
