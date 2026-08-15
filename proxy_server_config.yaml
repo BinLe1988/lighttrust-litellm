@@ -29,6 +29,12 @@ litellm_settings:
   num_retries: 3
   request_timeout: 600
   telemetry: false
+  cache: true
+  cache_params:
+    type: redis
+    host: 127.0.0.1
+    port: 6379
+    namespace: litellm_cache
   success_callback: ["langfuse"]
   callbacks:
     - custom_auth.router
