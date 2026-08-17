@@ -23,6 +23,8 @@ model_list:
       api_key: sk-qEc5uGVJ9Ie1BRkPs5hmq18z5GmM3HG7xiYcoOQUC8witRYP
       api_base: https://api.302ai.cn/v1
       custom_llm_provider: openai
+      input_cost_per_token: 6.6e-7
+      output_cost_per_token: 3.3e-6
 
 litellm_settings:
   drop_params: true
@@ -43,3 +45,4 @@ litellm_settings:
 
 general_settings:
   master_key: sk-litellm-master-key-1234
+  fallbacks: [{"deepseek-v4-flash": ["kimi-k2.5"]}, {"deepseek-v4-pro": ["kimi-k2.5"]}]
