@@ -140,6 +140,10 @@ class MetadataValidator(CustomLogger):
                     },
                 )
 
+        # 强制输出 token 上限：业务方漏配 max_tokens 时注入默认值，防止模型输出超长文本浪费 token
+        if data.get("max_tokens") is None:
+            data["max_tokens"] = int(os.environ.get("MAX_OUTPUT_TOKENS", "4096"))
+
         return data
 
 
