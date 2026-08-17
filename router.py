@@ -40,6 +40,7 @@ class CategoryRule:
     model: str
     conditions: list[RoutingCondition] = field(default_factory=list)
     priority: int = 0
+    candidates: list[str] = field(default_factory=list)  # 候选模型列表，非空时按成本最低选择
 
 
 @dataclass
@@ -113,6 +114,7 @@ def load_config(force: bool = False) -> RoutingConfig:
             model=c.get("model", routing_raw.get("default_model", "deepseek-v4-flash")),
             conditions=conds,
             priority=c.get("priority", 0),
+            candidates=c.get("candidates", []),
         ))
 
     _CONFIG_CACHE = RoutingConfig(
@@ -334,10 +336,49 @@ def route(
     else:
         matched_rule, confidence = _classify_heuristic(user_msg, config)
 
+    assigned = matched_rule.model
+    if matched_rule.candidates:
+        assigned = _pick_cheapest(matched_rule.candidates, matched_rule.model)
+
     return RoutingDecision(
         category=matched_rule.name,
-        assigned_model=matched_rule.model,
+        assigned_model=assigned,
         confidence=confidence,
         original_model=original_model,
         method=method,
     )
+
+
+def _pick_cheapest(candidates: list, fallback: str) -> str:
+    """从候选模型中选择综合成本（输入+输出均价）最低的模型。
+    成本数据来自 proxy_server_config.yaml 中各模型的 input/output_cost_per_token。
+    无成本数据的模型按无穷大处理；全部缺失时返回 fallback。
+    """
+    cfg_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "proxy_server_config.yaml"
+    )
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            proxy_cfg = yaml.safe_load(f)
+    except Exception as e:
+        logger.warning("cost-aware routing: failed to load proxy config: %s", e)
+        return fallback
+    costs = {}
+    for entry in proxy_cfg.get("model_list", []):
+        name = entry.get("model_name", "")
+        params = entry.get("litellm_params", {})
+        cin = params.get("input_cost_per_token")
+        cout = params.get("output_cost_per_token")
+        if cin is not None and cout is not None:
+            costs[name] = (float(cin) + float(cout)) / 2.0
+    best, best_cost = fallback, float("inf")
+    for model in candidates:
+        c = costs.get(model, float("inf"))
+        if c < best_cost:
+            best, best_cost = model, c
+    if best != fallback:
+        logger.info(
+            "cost-aware routing: picked %s (avg_cost=%.3g) from %s",
+            best, best_cost, candidates,
+        )
+    return best

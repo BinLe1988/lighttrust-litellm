@@ -22,9 +22,9 @@ routing:
     Reply with only the category name, nothing else.
 
   categories:
-    # ── 中文优先 → 本地模型 ──
+    # ── 中文优先 → kimi 模型 ──
     - name: chinese
-      model: bedi/glm-4.7
+      model: kimi-k2.5
       priority: 100
       conditions:
         - type: language
@@ -58,9 +58,10 @@ routing:
         - type: has_creative
           value: true
 
-    # ── 简短查询 → flash 够用 ──
+    # ── 简短查询 → 候选中按成本最低选择 ──
     - name: simple
       model: deepseek-v4-flash
+      candidates: [deepseek-v4-flash, kimi-k2.5]
       priority: 40
       conditions:
         - type: max_length
